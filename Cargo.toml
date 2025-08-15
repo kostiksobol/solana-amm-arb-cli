@@ -1,0 +1,31 @@
+[package]
+name = "solana-amm-arb-cli"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "solana_amm_arb_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "solana-amm-arb-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+
+# Solana
+solana-client = "2.2"
+solana-sdk = "2.2"
+solana-program = "2.2"         # for program_pack::Pack trait
+
+# SPL Token (for vault/mint decoding)
+spl-token = "4"
+
+# Carbon decoder
+carbon-core = "0.9.1"
+carbon-raydium-cpmm-decoder = "0.9.1"
