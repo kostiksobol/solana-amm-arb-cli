@@ -1,5 +1,7 @@
+use std::path::PathBuf;
+
 use clap::Parser;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Parser)]
 #[command(name = "solana-amm-arb-cli")]
@@ -7,88 +9,111 @@ use serde::{Deserialize, Serialize};
 pub struct Cli {
     #[arg(long, default_value = "https://api.mainnet-beta.solana.com")]
     pub rpc_url: String,
-    
+
     #[arg(long, default_value = "keypair.json")]
-    pub keypair: String,
-    
+    pub keypair: PathBuf,
+
     #[arg(long, default_value = "0.01")]
     pub amount_in: f64,
-    
+
     #[arg(long, default_value = "100")]
     pub spread_threshold_bps: u32,
-    
+
     #[arg(long, default_value = "500")]
-    pub slippage_bps: u16,
-    
-    #[arg(long, default_value = "100")]
+    pub slippage_bps: u32,
+
+    #[arg(long, default_value = "100000")]
     pub priority_fee: u64,
-    
-    #[arg(long)]
+
+    #[arg(long, default_value = "true")]
     pub simulate_only: bool,
-    
+
     #[arg(long, default_value = "4jgpwmuwaUrZgTvUjio8aBVNQJ6HcsF3YKAekpwwxTou")]
     pub pool_a: String,
-    
+
     #[arg(long, default_value = "7JuwJuNU88gurFnyWeiyGKbFmExMWcmRZntn9imEzdny")]
     pub pool_b: String,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct ArbitrageReport {
-    pub cli_args: CliArgs,
-    pub decision: String,
-    pub reason: String,
-    pub pools: PoolsData,
-    pub calculations: Calculations,
-    pub transaction: Option<TransactionData>,
+// Create arbitrage result structure
+#[derive(Serialize)]
+pub struct ArbitrageResult {
+    // Execution metadata
+    pub timestamp: String,
+    pub execution_time_ms: u64,
+    // CLI inputs
+    pub cli_inputs: CliInputs,
+    // Pool states
+    pub pool_states: PoolStates,
+    // Computed values
+    pub computed_values: ComputedValues,
+    // Decision and execution
+    pub decision: ArbitrageDecision,
+    // Transaction result (if executed)
+    pub transaction_result: Option<TransactionResult>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct CliArgs {
+#[derive(Serialize)]
+pub struct CliInputs {
     pub rpc_url: String,
-    pub keypair: String,
+    pub keypair: PathBuf,
     pub amount_in: f64,
     pub spread_threshold_bps: u32,
-    pub slippage_bps: u16,
+    pub slippage_bps: u32,
     pub priority_fee: u64,
     pub simulate_only: bool,
     pub pool_a: String,
     pub pool_b: String,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct PoolsData {
+#[derive(Serialize)]
+pub struct PoolStates {
     pub pool_a: PoolInfo,
     pub pool_b: PoolInfo,
-    pub spread_bps: u32,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 pub struct PoolInfo {
     pub address: String,
-    pub token0: String,
-    pub token1: String,
+    pub reserve0: u64,
+    pub reserve1: u64,
     pub price: f64,
-    pub fee_bps: u64,
-    pub reserve0: f64,
-    pub reserve1: f64,
+    pub fee_rate: u64,
+    pub mint0: String,
+    pub mint1: String,
+    pub decimals0: u8,
+    pub decimals1: u8,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct Calculations {
-    pub amount_in: f64,
-    pub expected_out: f64,
-    pub gross_profit: f64,
-    pub total_costs: f64,
-    pub net_pnl: f64,
+#[derive(Serialize)]
+pub struct ComputedValues {
+    pub amount_out: f64,
+    pub min_amount_out: f64,
+    pub pnl: f64,
+    pub spread_bps: f64,
     pub rent_cost: f64,
-    pub min_out: f64,
+    pub priority_fee_cost: f64,
+    pub total_fees: f64,
+    pub gross_profit: f64,
+    pub price_a: f64,
+    pub price_b: f64,
+    pub is_profitable: bool,
+    pub meets_spread_threshold: bool,
+    pub arbitrage_direction: String, // "A->B" or "B->A"
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct TransactionData {
-    pub signature: Option<String>,
-    pub instructions_count: usize,
-    pub size_bytes: usize,
-    pub compute_units_used: Option<u64>,
+#[derive(Serialize)]
+pub struct ArbitrageDecision {
+    pub should_execute: bool,
+    pub reasons: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct TransactionResult {
+    pub success: bool,
+    pub transaction_signature: Option<String>,
+    pub simulation_result: Option<String>,
+    pub error_message: Option<String>,
+    pub compute_units_consumed: Option<u64>,
 }
