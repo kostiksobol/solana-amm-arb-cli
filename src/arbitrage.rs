@@ -52,7 +52,7 @@ pub fn calculate_pnl(
 }
 
 // Raw token calculation using exact Raydium math
-fn calculate_swap_output_raw(
+pub fn calculate_swap_output_raw(
     amount_in: u64,
     reserve_in: u64,
     reserve_out: u64,

@@ -11,6 +11,7 @@ clap = { version = "4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
+borsh = "1.5.7"
 
 solana-client = "2"
 solana-sdk = "2"
@@ -19,5 +20,6 @@ solana-program = "2"
 spl-token = "8"
 spl-associated-token-account = "7"
 
-carbon-core = "0.9.1"
-carbon-raydium-cpmm-decoder = "0.9.1"
+carbon-core = "0.8"
+carbon-raydium-cpmm-decoder = "0.8"
+raydium_cpmm = "0.1"

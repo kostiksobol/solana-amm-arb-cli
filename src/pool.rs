@@ -38,6 +38,8 @@ pub fn load_pool_data(
         _ => return Err(anyhow!("Invalid pool account type")),
     };
 
+    println!("pool_state: {:?}", pool_state);
+
     let config_acc = rpc.get_account(&pool_state.amm_config)?;
     let amm_config = match decoder
         .decode_account(&config_acc)

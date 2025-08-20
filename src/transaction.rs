@@ -1,11 +1,13 @@
 use anyhow::Result;
+use raydium_cpmm::instructions::SwapBaseInputBuilder;
 use solana_client::{rpc_client::RpcClient, rpc_config::RpcSimulateTransactionConfig};
 use solana_sdk::{
     compute_budget::ComputeBudgetInstruction,
-    instruction::{AccountMeta, Instruction},
+    instruction::Instruction,
     message::Message,
     pubkey::Pubkey,
     signer::{Signer, keypair::Keypair},
+    system_instruction,
     transaction::Transaction,
 };
 use spl_associated_token_account::get_associated_token_address;
@@ -28,6 +30,15 @@ pub fn create_ata_instruction(
     Ok(Some(create_ata_ix))
 }
 
+fn get_pool_authority() -> Result<Pubkey> {
+    let program_id = raydium_cpmm::RAYDIUM_CP_SWAP_ID;
+
+    let (authority, _bump) =
+        Pubkey::find_program_address(&[b"vault_and_lp_mint_auth_seed"], &program_id);
+
+    Ok(authority)
+}
+
 pub fn create_swap_instruction(
     user: &Pubkey,
     pool: &PoolData,
@@ -37,74 +48,35 @@ pub fn create_swap_instruction(
     min_amount_out: u64,
     swap_direction: bool, // true = token0->token1, false = token1->token0
 ) -> Result<Instruction> {
-    let program_id: Pubkey = carbon_raydium_cpmm_decoder::PROGRAM_ID;
+    let authority = get_pool_authority()?;
 
-    // Derive required PDAs
-    let (pool_authority, _) =
-        Pubkey::find_program_address(&[b"vault_and_lp_mint_auth_seed"], &program_id);
-
-    // Build accounts vector согласно SwapBaseInputInstructionAccounts
-    let mut accounts = Vec::new();
-
-    // Core accounts
-    accounts.push(AccountMeta::new(*user, true)); // 0. Payer/User wallet
-    accounts.push(AccountMeta::new_readonly(pool_authority, false)); // 1. Pool authority PDA
-    accounts.push(AccountMeta::new_readonly(pool.amm_config, false)); // 2. AMM config
-    accounts.push(AccountMeta::new(pool.pool_id, false)); // 3. Pool state
-
-    // User token accounts
-    accounts.push(AccountMeta::new(*user_source_token, false)); // 4. User source token account
-    accounts.push(AccountMeta::new(*user_dest_token, false)); // 5. User destination token account
-
-    // Pool vaults (меняем порядок в зависимости от направления)
-    if swap_direction {
-        // token0 -> token1
-        accounts.push(AccountMeta::new(pool.vault0, false)); // 6. Input vault
-        accounts.push(AccountMeta::new(pool.vault1, false)); // 7. Output vault
+    let (input_vault, output_vault, input_mint, output_mint) = if swap_direction {
+        // token0 -> token1 (e.g., SOL -> USDC)
+        (pool.vault0, pool.vault1, pool.mint0, pool.mint1)
     } else {
-        // token1 -> token0
-        accounts.push(AccountMeta::new(pool.vault1, false)); // 6. Input vault
-        accounts.push(AccountMeta::new(pool.vault0, false)); // 7. Output vault
-    }
+        // token1 -> token0 (e.g., USDC -> SOL)
+        (pool.vault1, pool.vault0, pool.mint1, pool.mint0)
+    };
 
-    // Token programs (same for both source and dest if both are SPL tokens)
-    accounts.push(AccountMeta::new_readonly(spl_token::ID, false)); // 8. Token program (source)
-    accounts.push(AccountMeta::new_readonly(spl_token::ID, false)); // 9. Token program (dest)
+    let instruction = SwapBaseInputBuilder::new()
+        .payer(*user)
+        .authority(authority)
+        .amm_config(pool.amm_config)
+        .pool_state(pool.pool_id)
+        .input_token_account(*user_source_token)
+        .output_token_account(*user_dest_token)
+        .input_vault(input_vault)
+        .output_vault(output_vault)
+        .input_token_program(spl_token::id())
+        .output_token_program(spl_token::id())
+        .input_token_mint(input_mint)
+        .output_token_mint(output_mint)
+        .observation_state(pool.observation_key)
+        .amount_in(amount_in)
+        .minimum_amount_out(min_amount_out)
+        .instruction();
 
-    // Token mints (меняем порядок в зависимости от направления)
-    if swap_direction {
-        // token0 -> token1
-        accounts.push(AccountMeta::new_readonly(pool.mint0, false)); // 10. Input token mint
-        accounts.push(AccountMeta::new_readonly(pool.mint1, false)); // 11. Output token mint
-    } else {
-        // token1 -> token0
-        accounts.push(AccountMeta::new_readonly(pool.mint1, false)); // 10. Input token mint
-        accounts.push(AccountMeta::new_readonly(pool.mint0, false)); // 11. Output token mint
-    }
-    accounts.push(AccountMeta::new(pool.observation_key, false)); // 12. Observation state
-
-    // Build instruction data
-    let instruction_data = build_swap_instruction_data(amount_in, min_amount_out)?;
-
-    Ok(Instruction {
-        program_id,
-        accounts,
-        data: instruction_data,
-    })
-}
-
-fn build_swap_instruction_data(amount_in: u64, min_amount_out: u64) -> Result<Vec<u8>> {
-    let mut data = Vec::new();
-
-    // Discriminator for swap instruction (8 bytes)
-    data.extend_from_slice(&[0x8f, 0xbe, 0x5a, 0xda, 0xc4, 0x1e, 0x33, 0xde]);
-    // data.extend_from_slice(&[0xde, 0x33, 0x1e, 0xc4, 0xda, 0x5a, 0xbe, 0x8f]);
-
-    // Параметры инструкции
-    data.extend_from_slice(&amount_in.to_le_bytes()); // 8 bytes
-    data.extend_from_slice(&min_amount_out.to_le_bytes()); // 8 bytes
-
-    Ok(data)
+    Ok(instruction)
 }
 
 pub fn create_arbitrage_transaction(
@@ -137,6 +109,15 @@ pub fn create_arbitrage_transaction(
     if rpc.get_account(&user_0_ata).is_err() {
         if let Some(ata_ix) = create_ata_instruction(&payer_pubkey, &payer_pubkey, token0_mint)? {
             instructions.push(ata_ix);
+            instructions.push(system_instruction::transfer(
+                &payer_pubkey,
+                &user_0_ata,
+                amount_in,
+            ));
+            instructions.push(spl_token::instruction::sync_native(
+                &spl_token::id(),
+                &user_0_ata,
+            )?);
         }
     }
 
@@ -145,7 +126,6 @@ pub fn create_arbitrage_transaction(
             instructions.push(ata_ix);
         }
     }
-
     // 3. First swap in cheap pool: token0 -> token1
     let swap1_ix = create_swap_instruction(
         &payer_pubkey,
@@ -159,12 +139,33 @@ pub fn create_arbitrage_transaction(
     instructions.push(swap1_ix);
 
     // 4. Second swap in expensive pool: token1 -> token0
+    let amount_in_2 = crate::arbitrage::calculate_swap_output_raw(
+        amount_in,
+        cheap_pool.reserve0,
+        cheap_pool.reserve1,
+        cheap_pool.fee,
+    );
+    let expected_amount_out = crate::arbitrage::calculate_swap_output_raw(
+        amount_in_2,
+        expensive_pool.reserve1,
+        expensive_pool.reserve0,
+        expensive_pool.fee,
+    );
+    println!("amount_in_2: {}", amount_in_2);
+    println!("cheap_pool.reserve0: {}", cheap_pool.reserve0);
+    println!("cheap_pool.reserve1: {}", cheap_pool.reserve1);
+    println!("expensive_pool.reserve0: {}", expensive_pool.reserve0);
+    println!("expensive_pool.reserve1: {}", expensive_pool.reserve1);
+    println!("cheap_pool.fee: {}", cheap_pool.fee);
+    println!("expensive_pool.fee: {}", expensive_pool.fee);
+    println!("expected_amount_out: {}", expected_amount_out);
+    println!("min_out: {}", min_out);
     let swap2_ix = create_swap_instruction(
         &payer_pubkey,
         &expensive_pool,
         &user_1_ata,
         &user_0_ata,
-        u64::MAX, // Use all available tokens from first swap
+        amount_in_2,
         min_out,
         false, // token1 -> token0
     )?;
