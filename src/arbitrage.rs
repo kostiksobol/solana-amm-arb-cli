@@ -22,16 +22,16 @@ pub fn calculate_pnl(
     // Step 1: Buy from cheap pool (convert token0 to token1)
     let amount_out_cheap = calculate_swap_output_raw(
         amount_in_raw,
-        cheap_pool.reserve0,
-        cheap_pool.reserve1,
+        cheap_pool.real_reserve0,
+        cheap_pool.real_reserve1,
         cheap_pool.fee,
     );
 
     // Step 2: Sell on expensive pool (convert token1 back to token0)
     let amount_out_expensive = calculate_swap_output_raw(
         amount_out_cheap,
-        expensive_pool.reserve1,
-        expensive_pool.reserve0,
+        expensive_pool.real_reserve1,
+        expensive_pool.real_reserve0,
         expensive_pool.fee,
     );
 

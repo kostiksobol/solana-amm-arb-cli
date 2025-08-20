@@ -141,21 +141,21 @@ pub fn create_arbitrage_transaction(
     // 4. Second swap in expensive pool: token1 -> token0
     let amount_in_2 = crate::arbitrage::calculate_swap_output_raw(
         amount_in,
-        cheap_pool.reserve0,
-        cheap_pool.reserve1,
+        cheap_pool.real_reserve0,
+        cheap_pool.real_reserve1,
         cheap_pool.fee,
     );
     let expected_amount_out = crate::arbitrage::calculate_swap_output_raw(
         amount_in_2,
-        expensive_pool.reserve1,
-        expensive_pool.reserve0,
+        expensive_pool.real_reserve1,
+        expensive_pool.real_reserve0,
         expensive_pool.fee,
     );
     println!("amount_in_2: {}", amount_in_2);
-    println!("cheap_pool.reserve0: {}", cheap_pool.reserve0);
-    println!("cheap_pool.reserve1: {}", cheap_pool.reserve1);
-    println!("expensive_pool.reserve0: {}", expensive_pool.reserve0);
-    println!("expensive_pool.reserve1: {}", expensive_pool.reserve1);
+    println!("cheap_pool.real_reserve0: {}", cheap_pool.real_reserve0);
+    println!("cheap_pool.real_reserve1: {}", cheap_pool.real_reserve1);
+    println!("expensive_pool.real_reserve0: {}", expensive_pool.real_reserve0);
+    println!("expensive_pool.real_reserve1: {}", expensive_pool.real_reserve1);
     println!("cheap_pool.fee: {}", cheap_pool.fee);
     println!("expensive_pool.fee: {}", expensive_pool.fee);
     println!("expected_amount_out: {}", expected_amount_out);

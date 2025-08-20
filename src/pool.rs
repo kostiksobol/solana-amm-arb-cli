@@ -11,7 +11,13 @@ pub struct PoolData {
     pub amm_config: Pubkey,
     pub observation_key: Pubkey,
     pub reserve0: u64,
+    pub protocol_fees_token0: u64,
+    pub fund_fees_token0: u64,
+    pub real_reserve0: u64,
     pub reserve1: u64,
+    pub protocol_fees_token1: u64,
+    pub fund_fees_token1: u64,
+    pub real_reserve1: u64,
     pub fee: u64,
     pub decimals0: u8,
     pub decimals1: u8,
@@ -38,8 +44,6 @@ pub fn load_pool_data(
         _ => return Err(anyhow!("Invalid pool account type")),
     };
 
-    println!("pool_state: {:?}", pool_state);
-
     let config_acc = rpc.get_account(&pool_state.amm_config)?;
     let amm_config = match decoder
         .decode_account(&config_acc)
@@ -61,7 +65,13 @@ pub fn load_pool_data(
         amm_config: pool_state.amm_config,
         observation_key: pool_state.observation_key,
         reserve0: vault0_data.amount,
+        protocol_fees_token0: pool_state.protocol_fees_token0,
+        fund_fees_token0: pool_state.fund_fees_token0,
+        real_reserve0: vault0_data.amount - pool_state.protocol_fees_token0 - pool_state.fund_fees_token0,
         reserve1: vault1_data.amount,
+        protocol_fees_token1: pool_state.protocol_fees_token1,
+        fund_fees_token1: pool_state.fund_fees_token1,
+        real_reserve1: vault1_data.amount - pool_state.protocol_fees_token1 - pool_state.fund_fees_token1,
         fee: amm_config.trade_fee_rate,
         decimals0: pool_state.mint0_decimals,
         decimals1: pool_state.mint1_decimals,
@@ -82,7 +92,13 @@ pub fn normalize_pools(pool_a: &PoolData, pool_b: &mut PoolData) -> Result<()> {
             amm_config: pool_b.amm_config,
             observation_key: pool_b.observation_key,
             reserve0: pool_b.reserve1,
+            protocol_fees_token0: pool_b.protocol_fees_token1,
+            fund_fees_token0: pool_b.fund_fees_token1,
+            real_reserve0: pool_b.real_reserve1,
             reserve1: pool_b.reserve0,
+            protocol_fees_token1: pool_b.protocol_fees_token0,
+            fund_fees_token1: pool_b.fund_fees_token0,
+            real_reserve1: pool_b.real_reserve0,
             fee: pool_b.fee,
             decimals0: pool_b.decimals1,
             decimals1: pool_b.decimals0,

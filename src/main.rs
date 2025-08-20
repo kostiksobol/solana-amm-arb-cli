@@ -59,11 +59,18 @@ fn main() -> Result<()> {
     let pool_a = load_pool_data(&rpc, &pool_a_addr, &decoder)?;
     let mut pool_b = load_pool_data(&rpc, &pool_b_addr, &decoder)?;
     normalize_pools(&pool_a, &mut pool_b)?;
+
     info!("✅ Pool data loaded and normalized");
 
     info!("📊 Pool A state:");
     info!("  • Reserve 0: {} ({})", pool_a.reserve0, pool_a.mint0);
     info!("  • Reserve 1: {} ({})", pool_a.reserve1, pool_a.mint1);
+    info!("  • Real reserve 0: {} ({})", pool_a.real_reserve0, pool_a.mint0);
+    info!("  • Real reserve 1: {} ({})", pool_a.real_reserve1, pool_a.mint1);
+    info!("  • Protocol fees token 0: {} ({})", pool_a.protocol_fees_token0, pool_a.mint0);
+    info!("  • Fund fees token 0: {} ({})", pool_a.fund_fees_token0, pool_a.mint0);
+    info!("  • Protocol fees token 1: {} ({})", pool_a.protocol_fees_token1, pool_a.mint1);
+    info!("  • Fund fees token 1: {} ({})", pool_a.fund_fees_token1, pool_a.mint1);
     info!(
         "  • Fee rate: {} ({}%)",
         pool_a.fee,
@@ -73,6 +80,12 @@ fn main() -> Result<()> {
     info!("📊 Pool B state:");
     info!("  • Reserve 0: {} ({})", pool_b.reserve0, pool_b.mint0);
     info!("  • Reserve 1: {} ({})", pool_b.reserve1, pool_b.mint1);
+    info!("  • Real reserve 0: {} ({})", pool_b.real_reserve0, pool_b.mint0);
+    info!("  • Real reserve 1: {} ({})", pool_b.real_reserve1, pool_b.mint1);
+    info!("  • Protocol fees token 0: {} ({})", pool_a.protocol_fees_token0, pool_a.mint0);
+    info!("  • Fund fees token 0: {} ({})", pool_a.fund_fees_token0, pool_a.mint0);
+    info!("  • Protocol fees token 1: {} ({})", pool_a.protocol_fees_token1, pool_a.mint1);
+    info!("  • Fund fees token 1: {} ({})", pool_a.fund_fees_token1, pool_a.mint1);
     info!(
         "  • Fee rate: {} ({}%)",
         pool_b.fee,
@@ -80,14 +93,14 @@ fn main() -> Result<()> {
     );
 
     let price_a = calculate_price(
-        pool_a.reserve0,
-        pool_a.reserve1,
+        pool_a.real_reserve0,
+        pool_b.real_reserve1,
         pool_a.decimals0,
         pool_a.decimals1,
     );
     let price_b = calculate_price(
-        pool_b.reserve0,
-        pool_b.reserve1,
+        pool_b.real_reserve0,
+        pool_a.real_reserve1,
         pool_b.decimals0,
         pool_b.decimals1,
     );
@@ -171,7 +184,7 @@ fn main() -> Result<()> {
     // Transaction execution
     let mut transaction_result = None;
 
-    if true {
+    if should_execute {
         info!("🔄 Creating arbitrage transaction...");
         let tx = if price_a > price_b {
             create_arbitrage_transaction(
@@ -282,6 +295,12 @@ fn main() -> Result<()> {
                 address: pool_a_addr.clone(),
                 reserve0: pool_a.reserve0,
                 reserve1: pool_a.reserve1,
+                real_reserve0: pool_a.real_reserve0,
+                real_reserve1: pool_a.real_reserve1,
+                protocol_fees_token0: pool_a.protocol_fees_token0,
+                fund_fees_token0: pool_a.fund_fees_token0,
+                protocol_fees_token1: pool_a.protocol_fees_token1,
+                fund_fees_token1: pool_a.fund_fees_token1,
                 price: price_a,
                 fee_rate: pool_a.fee,
                 mint0: pool_a.mint0.to_string(),
@@ -293,6 +312,12 @@ fn main() -> Result<()> {
                 address: pool_b_addr.clone(),
                 reserve0: pool_b.reserve0,
                 reserve1: pool_b.reserve1,
+                real_reserve0: pool_b.real_reserve0,
+                real_reserve1: pool_b.real_reserve1,
+                protocol_fees_token0: pool_b.protocol_fees_token0,
+                fund_fees_token0: pool_b.fund_fees_token0,
+                protocol_fees_token1: pool_b.protocol_fees_token1,
+                fund_fees_token1: pool_b.fund_fees_token1,
                 price: price_b,
                 fee_rate: pool_b.fee,
                 mint0: pool_b.mint0.to_string(),
