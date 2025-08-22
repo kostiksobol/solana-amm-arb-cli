@@ -1,398 +1,509 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use carbon_raydium_cpmm_decoder::RaydiumCpmmDecoder;
 use chrono::Utc;
 use clap::Parser;
 use log::{error, info, warn};
+use serde_json::json;
 use solana_client::rpc_client::RpcClient;
-use solana_amm_arb_cli::{
-    arbitrage::{Arbitrage, calculate_min_out, calculate_pnl, calculate_price, spread_bps},
-    cli::{
-        ArbitrageDecision, ArbitrageResult, Cli, CliInputs, ComputedValues, PoolInfo, PoolStates,
-        TransactionResult,
-    },
-    pool::{load_pool_data, normalize_pools},
-    transaction::{create_arbitrage_transaction, simulate_transaction},
-    utils::{count_missing_token_accounts, get_token_account_rent, load_keypair},
-};
-use solana_sdk::signer::Signer;
+use solana_sdk::{pubkey::Pubkey, signer::Signer};
+use spl_associated_token_account::get_associated_token_address;
+use std::fs;
 use std::time::Instant;
+
+use solana_amm_arb_cli::{
+    arbitrage::{calculate_min_out, calculate_pnl, calculate_price, spread_bps},
+    cli::{
+        config_set_amount_in, config_set_keypair, config_set_pools, config_set_priority_fee,
+        config_set_rpc, config_set_simulate, config_set_slippage_bps,
+        config_set_spread_threshold_bps, default_state, load_state, save_state, state_file_path,
+        take_or_panic, Cli, Command, ConfigCmd,
+    },
+    pool::PoolData,
+    transaction::{create_arbitrage_transaction, simulate_transaction},
+    utils::{get_missing_token_account, get_token_account_rent, load_keypair},
+};
+
+macro_rules! step {
+    ($steps:expr, $($arg:tt)*) => {{
+        let s = format!($($arg)*);
+        $steps.push(s.clone());
+        info!("{}", s);
+    }};
+}
+
+fn pk_s(p: &Pubkey) -> String {
+    p.to_string()
+}
 
 fn main() -> Result<()> {
     // Initialize logging
     env_logger::init();
     let start_time = Instant::now();
+    info!("════════════════════════════════════════════");
+    info!("🚀 Starting solana-cpmm-arb-cli");
+    info!("════════════════════════════════════════════");
 
-    info!("🚀 Starting Solana AMM Arbitrage CLI");
+    let cli = Cli::parse();
 
-    let Cli {
-        rpc_url,
-        keypair: keypair_path,
-        amount_in,
-        spread_threshold_bps,
-        slippage_bps,
-        priority_fee,
-        simulate_only,
-        pool_a: pool_a_addr,
-        pool_b: pool_b_addr,
-    } = Cli::parse();
+    // Ensure state dir exists
+    let state_path = state_file_path()?;
+    fs::create_dir_all(state_path.parent().unwrap())
+        .with_context(|| format!("create state dir: {}", state_path.display()))?;
 
-    info!("📋 Configuration loaded:");
+    // Load or initialize defaults
+    let mut state = load_state(&state_path).unwrap_or_else(|_| default_state());
+
+    // --- Subcommands (config) ---
+    if let Some(Command::Config { cmd }) = cli.cmd {
+        match cmd {
+            ConfigCmd::Show => {
+                println!("{}", serde_json::to_string_pretty(&state)?);
+            }
+            ConfigCmd::ResetDefaults => {
+                state = default_state();
+                save_state(&state_path, &state)?;
+                println!(
+                    "State reset to defaults and saved to {}",
+                    state_path.display()
+                );
+            }
+            ConfigCmd::SetPools => config_set_pools(&state_path, &mut state)?,
+            ConfigCmd::SetRpcUrl => config_set_rpc(&state_path, &mut state)?,
+            ConfigCmd::SetKeypair => config_set_keypair(&state_path, &mut state)?,
+            ConfigCmd::SetAmountIn => config_set_amount_in(&state_path, &mut state)?,
+            ConfigCmd::SetSpreadThresholdBps => {
+                config_set_spread_threshold_bps(&state_path, &mut state)?
+            }
+            ConfigCmd::SetSlippageBps => config_set_slippage_bps(&state_path, &mut state)?,
+            ConfigCmd::SetPriorityFee => config_set_priority_fee(&state_path, &mut state)?,
+            ConfigCmd::SetSimulate => config_set_simulate(&state_path, &mut state)?,
+        }
+        return Ok(());
+    }
+
+    // --- Resolve runtime params from flags OR state ---
+    let rpc_url = take_or_panic(cli.rpc_url, state.rpc_url.clone(), "rpc-url");
+    let keypair_path = take_or_panic(cli.keypair, state.keypair_path.clone(), "keypair");
+    let amount_in = take_or_panic(cli.amount_in, state.amount_in, "amount-in");
+    let spread_threshold_bps = take_or_panic(
+        cli.spread_threshold_bps,
+        state.spread_threshold_bps,
+        "spread-threshold-bps",
+    );
+    let slippage_bps = take_or_panic(cli.slippage_bps, state.slippage_bps, "slippage-bps");
+    let priority_fee_microlamports =
+        take_or_panic(cli.priority_fee, state.priority_fee_microlamports, "priority-fee");
+    let simulate_only = take_or_panic(cli.simulate_only, state.simulate_only, "simulate-only");
+
+    info!("📋 CONFIG");
     info!("  • RPC URL: {}", rpc_url);
-    info!("  • Amount In: {} tokens", amount_in);
+    info!("  • Keypair: {:?}", keypair_path);
+    info!("  • Amount In: {}", amount_in);
     info!("  • Spread Threshold: {} bps", spread_threshold_bps);
     info!("  • Slippage: {} bps", slippage_bps);
-    info!("  • Priority Fee: {} micro-lamports", priority_fee);
+    info!("  • Priority Fee: {} µlamports", priority_fee_microlamports);
     info!("  • Simulate Only: {}", simulate_only);
-    info!("  • Pool A: {}", pool_a_addr);
-    info!("  • Pool B: {}", pool_b_addr);
 
     let rpc = RpcClient::new(rpc_url.clone());
     let keypair = load_keypair(&keypair_path)?;
     info!("🔑 Keypair loaded: {}", keypair.pubkey());
 
-    let token_account_rent = get_token_account_rent(&rpc)?;
-    info!("💰 Token account rent: {} lamports", token_account_rent);
+    // Mints + pools from state
+    let mint_in = state
+        .mint_in
+        .as_ref()
+        .expect("mint-in is required")
+        .parse::<Pubkey>()?;
+    let mint_out = state
+        .mint_out
+        .as_ref()
+        .expect("mint-out is required")
+        .parse::<Pubkey>()?;
 
+    let pool_a_addr = state.pool_a.take().expect("pool-a is required");
+    let pool_b_addr = state.pool_b.take().expect("pool-b is required");
+
+    info!("🔄 Loading pools…");
     let decoder = RaydiumCpmmDecoder;
+    let pool_a = PoolData::new(&rpc, &pool_a_addr, &decoder)?;
+    let pool_b = PoolData::new(&rpc, &pool_b_addr, &decoder)?;
 
-    info!("🔄 Loading pool data...");
-    let pool_a = load_pool_data(&rpc, &pool_a_addr, &decoder)?;
-    let mut pool_b = load_pool_data(&rpc, &pool_b_addr, &decoder)?;
-    normalize_pools(&pool_a, &mut pool_b)?;
+    // Raw values, then normalized so that token0 == mint_in for BOTH pools
+    let mut pool_a_values = pool_a.get_values(&rpc)?;
+    let mut pool_b_values = pool_b.get_values(&rpc)?;
+    pool_a_values.normalize_pool_values(&mint_in);
+    pool_b_values.normalize_pool_values(&mint_in);
 
-    info!("✅ Pool data loaded and normalized");
+    // ---------- Detailed Pool Logging ----------
+    info!("──────── Pool A [{}] ────────", pool_a_addr);
+    info!("  • token0 (mint_in): {}", pk_s(&pool_a_values.mint0));
+    info!("    - decimals: {}", pool_a_values.token0_decimals);
+    info!("    - reserve0: {}", pool_a_values.reserve0);
+    info!("    - vault_amount0: {}", pool_a_values.vault_amount0);
+    info!("    - protocol_fees_token0: {}", pool_a_values.protocol_fees_token0);
+    info!("    - fund_fees_token0: {}", pool_a_values.fund_fees_token0);
+    info!("  • token1 (mint_out): {}", pk_s(&pool_a_values.mint1));
+    info!("    - decimals: {}", pool_a_values.token1_decimals);
+    info!("    - reserve1: {}", pool_a_values.reserve1);
+    info!("    - vault_amount1: {}", pool_a_values.vault_amount1);
+    info!("    - protocol_fees_token1: {}", pool_a_values.protocol_fees_token1);
+    info!("    - fund_fees_token1: {}", pool_a_values.fund_fees_token1);
+    info!("  • trade_fee_rate (ppm/bps-style raw): {}", pool_a_values.trade_fee_rate);
 
-    info!("📊 Pool A state:");
-    info!("  • Reserve 0: {} ({})", pool_a.reserve0, pool_a.mint0);
-    info!("  • Reserve 1: {} ({})", pool_a.reserve1, pool_a.mint1);
-    info!("  • Real reserve 0: {} ({})", pool_a.real_reserve0, pool_a.mint0);
-    info!("  • Real reserve 1: {} ({})", pool_a.real_reserve1, pool_a.mint1);
-    info!("  • Protocol fees token 0: {} ({})", pool_a.protocol_fees_token0, pool_a.mint0);
-    info!("  • Fund fees token 0: {} ({})", pool_a.fund_fees_token0, pool_a.mint0);
-    info!("  • Protocol fees token 1: {} ({})", pool_a.protocol_fees_token1, pool_a.mint1);
-    info!("  • Fund fees token 1: {} ({})", pool_a.fund_fees_token1, pool_a.mint1);
-    info!(
-        "  • Fee rate: {} ({}%)",
-        pool_a.fee,
-        pool_a.fee as f64 / 10000.0
-    );
+    info!("──────── Pool B [{}] ────────", pool_b_addr);
+    info!("  • token0 (mint_in): {}", pk_s(&pool_b_values.mint0));
+    info!("    - decimals: {}", pool_b_values.token0_decimals);
+    info!("    - reserve0: {}", pool_b_values.reserve0);
+    info!("    - vault_amount0: {}", pool_b_values.vault_amount0);
+    info!("    - protocol_fees_token0: {}", pool_b_values.protocol_fees_token0);
+    info!("    - fund_fees_token0: {}", pool_b_values.fund_fees_token0);
+    info!("  • token1 (mint_out): {}", pk_s(&pool_b_values.mint1));
+    info!("    - decimals: {}", pool_b_values.token1_decimals);
+    info!("    - reserve1: {}", pool_b_values.reserve1);
+    info!("    - vault_amount1: {}", pool_b_values.vault_amount1);
+    info!("    - protocol_fees_token1: {}", pool_b_values.protocol_fees_token1);
+    info!("    - fund_fees_token1: {}", pool_b_values.fund_fees_token1);
+    info!("  • trade_fee_rate (ppm/bps-style raw): {}", pool_b_values.trade_fee_rate);
 
-    info!("📊 Pool B state:");
-    info!("  • Reserve 0: {} ({})", pool_b.reserve0, pool_b.mint0);
-    info!("  • Reserve 1: {} ({})", pool_b.reserve1, pool_b.mint1);
-    info!("  • Real reserve 0: {} ({})", pool_b.real_reserve0, pool_b.mint0);
-    info!("  • Real reserve 1: {} ({})", pool_b.real_reserve1, pool_b.mint1);
-    info!("  • Protocol fees token 0: {} ({})", pool_a.protocol_fees_token0, pool_a.mint0);
-    info!("  • Fund fees token 0: {} ({})", pool_a.fund_fees_token0, pool_a.mint0);
-    info!("  • Protocol fees token 1: {} ({})", pool_a.protocol_fees_token1, pool_a.mint1);
-    info!("  • Fund fees token 1: {} ({})", pool_a.fund_fees_token1, pool_a.mint1);
-    info!(
-        "  • Fee rate: {} ({}%)",
-        pool_b.fee,
-        pool_b.fee as f64 / 10000.0
-    );
-
+    // Prices: both pools are oriented as mint_in -> mint_out (0 -> 1)
     let price_a = calculate_price(
-        pool_a.real_reserve0,
-        pool_b.real_reserve1,
-        pool_a.decimals0,
-        pool_a.decimals1,
+        pool_a_values.reserve0,
+        pool_a_values.reserve1,
+        pool_a_values.token0_decimals,
+        pool_a_values.token1_decimals,
     );
     let price_b = calculate_price(
-        pool_b.real_reserve0,
-        pool_a.real_reserve1,
-        pool_b.decimals0,
-        pool_b.decimals1,
+        pool_b_values.reserve0,
+        pool_b_values.reserve1,
+        pool_b_values.token0_decimals,
+        pool_b_values.token1_decimals,
     );
-    let spread = spread_bps(price_a, price_b);
+    let spread_bps_val = spread_bps(price_a, price_b);
 
-    info!("💱 Price analysis:");
-    info!("  • Pool A price: {:.6}", price_a);
-    info!("  • Pool B price: {:.6}", price_b);
-    info!("  • Spread: {:.2} bps", spread);
+    info!("──────── Prices (0→1 i.e., {} → {}) ────────", pk_s(&mint_in), pk_s(&mint_out));
+    info!("  • Pool A price: {:.12}", price_a);
+    info!("  • Pool B price: {:.12}", price_b);
+    info!("  • Spread: {:.4} bps", spread_bps_val);
 
-    let rent = count_missing_token_accounts(&rpc, &keypair.pubkey(), &pool_a.mint0, &pool_b.mint1)?
-        as u64
-        * token_account_rent;
-    info!("💸 Transaction costs:");
-    info!("  • Token account rent: {} lamports", rent);
-    info!("  • Priority fee: {} micro-lamports", priority_fee);
+    let mut steps: Vec<String> = Vec::new();
+    step!(steps, "Pools: A={}  B={}", pool_a_addr, pool_b_addr);
+    step!(steps, "Mints: mint_in={}  mint_out={}", pk_s(&mint_in), pk_s(&mint_out));
+    step!(steps, "Prices: A={:.12}  B={:.12}  spread_bps={:.4}", price_a, price_b, spread_bps_val);
 
-    let arbitrage_direction = if price_a > price_b { "A->B" } else { "B->A" };
-    info!("🔄 Arbitrage direction: {}", arbitrage_direction);
+    // ---------- Token accounts & rent ----------
+    let ata_in_addr = get_associated_token_address(&keypair.pubkey(), &mint_in);
+    let ata_out_addr = get_associated_token_address(&keypair.pubkey(), &mint_out);
+    let atas = vec![
+        get_missing_token_account(&rpc, &keypair.pubkey(), &mint_in),
+        get_missing_token_account(&rpc, &keypair.pubkey(), &mint_out),
+    ];
+    let rent_per_ata = get_token_account_rent(&rpc)?;
+    let rent_raw = (!atas[0].exists as u64 + !atas[1].exists as u64) * rent_per_ata;
 
-    let Arbitrage {
-        amount_out, pnl, ..
-    } = if price_a > price_b {
-        calculate_pnl(amount_in, &pool_a, &pool_b, rent, priority_fee)
+    info!("──────── Token Accounts ────────");
+    info!("  • Owner: {}", keypair.pubkey());
+    info!(
+        "  • {} → ATA: {}  (exists: {})",
+        pk_s(&mint_in),
+        ata_in_addr,
+        atas[0].exists
+    );
+    info!(
+        "  • {} → ATA: {}  (exists: {})",
+        pk_s(&mint_out),
+        ata_out_addr,
+        atas[1].exists
+    );
+    info!("  • Rent per ATA: {} lamports", rent_per_ata);
+    info!(
+        "  • Rent to be paid now (if creating): {} lamports",
+        rent_raw
+    );
+    step!(
+        steps,
+        "ATAs: in={} (exists={}), out={} (exists={}), rent_per_ata={}, rent_raw={}",
+        ata_in_addr,
+        atas[0].exists,
+        ata_out_addr,
+        atas[1].exists,
+        rent_per_ata,
+        rent_raw
+    );
+
+    // ---------- PnL both directions ----------
+    let arb_a_b = calculate_pnl(
+        amount_in,
+        &pool_a_values,
+        &pool_b_values,
+        rent_raw,
+        priority_fee_microlamports,
+    );
+    let arb_b_a = calculate_pnl(
+        amount_in,
+        &pool_b_values,
+        &pool_a_values,
+        rent_raw,
+        priority_fee_microlamports,
+    );
+
+    // Choose direction with higher net PnL (fallback to higher gross)
+    let (arb, pool_in, pool_out, in_vals, out_vals, price_in, price_out) =
+        if arb_a_b.pnl.is_some() && arb_b_a.pnl.is_some() {
+            if arb_a_b.pnl.unwrap() > arb_b_a.pnl.unwrap() {
+                (arb_a_b, &pool_a, &pool_b, &pool_a_values, &pool_b_values, price_a, price_b)
+            } else {
+                (arb_b_a, &pool_b, &pool_a, &pool_b_values, &pool_a_values, price_b, price_a)
+            }
+        } else if arb_a_b.gross_profit > arb_b_a.gross_profit {
+            (arb_a_b, &pool_a, &pool_b, &pool_a_values, &pool_b_values, price_a, price_b)
+        } else {
+            (arb_b_a, &pool_b, &pool_a, &pool_b_values, &pool_a_values, price_b, price_a)
+        };
+
+    info!("──────── Direction ────────");
+    info!("  • mint_in:  {}", pk_s(&mint_in));
+    info!("  • mint_out: {}", pk_s(&mint_out));
+    info!("  • First pool (0→1): {}", pool_in.pool_id);
+    info!("  • Second pool (0→1): {}", pool_out.pool_id);
+    info!("  • Price first:  {:.12}", price_in);
+    info!("  • Price second: {:.12}", price_out);
+
+    // Log the flow amounts across both swaps
+    // amount_in is in mint_in units; arb.amount_out_1_raw should be in mint_out raw units;
+    // arb.amount_out_2_raw should be back in mint_in raw units.
+    let out1 = arb.amount_out_1;       // mint_out (decimal)
+    let out2 = arb.amount_out_2;       // mint_in (decimal)
+
+    info!("──────── Swap Path Amounts ────────");
+    info!("  • Start: {} (mint_in {})", amount_in, pk_s(&mint_in));
+    info!(
+        "  • After first swap ({}): {} (mint_out {})",
+        pool_in.pool_id, out1, pk_s(&mint_out)
+    );
+    info!(
+        "  • After second swap ({}): {} (back to mint_in {})",
+        pool_out.pool_id, out2, pk_s(&mint_in)
+    );
+
+    step!(
+        steps,
+        "Direction: first={}, second={}, out1={} {}, out2={} {}",
+        pool_in.pool_id,
+        pool_out.pool_id,
+        out1,
+        pk_s(&mint_out),
+        out2,
+        pk_s(&mint_in)
+    );
+
+    // ---------- Decision ----------
+    let is_profitable = if let Some(p) = arb.pnl {
+        p > 0.0
     } else {
-        calculate_pnl(amount_in, &pool_b, &pool_a, rent, priority_fee)
+        arb.gross_profit > 0.0
     };
-
-    let min_out = calculate_min_out(amount_out, slippage_bps);
-    let amount_in_raw = (amount_in * 10_f64.powi(pool_a.decimals0 as i32)) as u64;
-    let min_out_raw = (min_out * 10_f64.powi(pool_b.decimals0 as i32)) as u64;
-
-    let rent_cost = rent as f64 / 1_000_000_000.0;
-    let priority_fee_cost = priority_fee as f64 / 1_000_000_000_000.0; // Convert micro-lamports to SOL
-    let total_fees = rent_cost + priority_fee_cost;
-    let gross_profit = amount_out - amount_in;
-    let is_profitable = pnl > 0.0;
-    let meets_spread_threshold = spread.abs() >= spread_threshold_bps as f64;
-
-    info!("📈 Arbitrage calculations:");
-    info!("  • Amount in: {} tokens", amount_in);
-    info!("  • Expected amount out: {} tokens", amount_out);
-    info!("  • Minimum amount out (with slippage): {} tokens", min_out);
-    info!("  • Gross profit: {} tokens", gross_profit);
-    info!("  • Total fees: {} SOL", total_fees);
-    info!("  • Net PnL: {} tokens", pnl);
-
-    // Decision logic
-    let mut reasons = Vec::new();
-    let mut warnings = Vec::new();
+    let meets_spread_threshold = spread_bps_val >= spread_threshold_bps as f64;
     let should_execute = is_profitable && meets_spread_threshold;
 
     if !is_profitable {
-        reasons.push("Not profitable after fees".to_string());
-        warn!("❌ Trade not profitable: PnL = {} tokens", pnl);
+        warn!("❌ Not profitable after fees (pnl {:?}, gross {})", arb.pnl, arb.gross_profit);
+        step!(steps, "Not profitable after fees");
     }
-
     if !meets_spread_threshold {
-        reasons.push(format!(
-            "Spread ({:.2} bps) below threshold ({} bps)",
-            spread.abs(),
-            spread_threshold_bps
-        ));
         warn!(
-            "❌ Spread too low: {:.2} bps < {} bps",
-            spread.abs(),
+            "❌ Spread below threshold: {:.4} < {}",
+            spread_bps_val, spread_threshold_bps
+        );
+        step!(
+            steps,
+            "Spread below threshold: {:.4} < {}",
+            spread_bps_val,
             spread_threshold_bps
         );
     }
+    info!("✔ Decision: should_execute={}", should_execute);
+    step!(steps, "Decision should_execute={}", should_execute);
 
-    if should_execute {
-        info!("✅ Arbitrage opportunity detected!");
-        reasons.push("Profitable arbitrage opportunity found".to_string());
-    }
+    // ---------- Slippage & tx build ----------
+    let min_out = calculate_min_out(arb.amount_out_2_raw, slippage_bps);
+    info!(
+        "🛡  Slippage protection: min_out(raw)={} (slippage_bps={})",
+        min_out, slippage_bps
+    );
+    step!(steps, "min_out (slippage_bps={}) = {}", slippage_bps, min_out);
+
+    let tx = create_arbitrage_transaction(
+        &rpc,
+        &keypair,
+        pool_in,
+        pool_out,
+        arb.amount_in_raw,
+        arb.amount_out_1_raw,
+        atas.clone(),
+        min_out,
+        priority_fee_microlamports,
+    )?;
+
+    // Prepare token-account creation result flags
+    let planned_create_in = !atas[0].exists;
+    let planned_create_out = !atas[1].exists;
+
+    // ---------- Execute or simulate ----------
+    let mut tx_signature: Option<String> = None;
+    let mut simulate_result: Option<String> = None;
+    let mut tx_error: Option<String> = None;
 
     if simulate_only {
-        warnings.push("Running in simulation mode only".to_string());
-        info!("⚠️  Simulation mode enabled - no actual trades will be executed");
-    }
-
-    // Transaction execution
-    let mut transaction_result = None;
-
-    if should_execute {
-        info!("🔄 Creating arbitrage transaction...");
-        let tx = if price_a > price_b {
-            create_arbitrage_transaction(
-                &rpc,
-                &keypair,
-                &pool_a,
-                &pool_b,
-                amount_in_raw,
-                min_out_raw,
-                priority_fee,
-            )?
-        } else {
-            create_arbitrage_transaction(
-                &rpc,
-                &keypair,
-                &pool_b,
-                &pool_a,
-                amount_in_raw,
-                min_out_raw,
-                priority_fee,
-            )?
-        };
-
-        if simulate_only {
-            info!("🧪 Simulating transaction...");
-            match simulate_transaction(&rpc, &tx) {
-                Ok(sim_result) => {
-                    if sim_result.err.is_none() {
-                        info!("✅ Transaction simulation successful");
-                        transaction_result = Some(TransactionResult {
-                            success: true,
-                            transaction_signature: None,
-                            simulation_result: Some(format!("{:?}", sim_result)),
-                            error_message: None,
-                            compute_units_consumed: sim_result.units_consumed,
-                        });
-                    } else {
-                        error!("❌ Transaction simulation failed: {:?}", sim_result.err);
-                        transaction_result = Some(TransactionResult {
-                            success: false,
-                            transaction_signature: None,
-                            simulation_result: Some(format!("{:?}", sim_result)),
-                            error_message: sim_result.err.map(|e| format!("{:?}", e)),
-                            compute_units_consumed: sim_result.units_consumed,
-                        });
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Simulation error: {}", e);
-                    transaction_result = Some(TransactionResult {
-                        success: false,
-                        transaction_signature: None,
-                        simulation_result: None,
-                        error_message: Some(e.to_string()),
-                        compute_units_consumed: None,
-                    });
-                }
+        info!("🧪 Simulating transaction…");
+        step!(steps, "simulate_only=true → simulate");
+        match simulate_transaction(&rpc, &tx) {
+            Ok(result) => {
+                simulate_result = Some(format!("{:?}", result));
+                info!("✅ Simulation OK");
+                step!(steps, "simulation OK");
             }
-        } else {
-            info!("📡 Sending transaction to blockchain...");
-            match rpc.send_transaction(&tx) {
-                Ok(tx_hash) => {
-                    info!("✅ Transaction sent successfully: {}", tx_hash);
-                    transaction_result = Some(TransactionResult {
-                        success: true,
-                        transaction_signature: Some(tx_hash.to_string()),
-                        simulation_result: None,
-                        error_message: None,
-                        compute_units_consumed: None,
-                    });
-                }
-                Err(e) => {
-                    error!("❌ Transaction failed: {}", e);
-                    transaction_result = Some(TransactionResult {
-                        success: false,
-                        transaction_signature: None,
-                        simulation_result: None,
-                        error_message: Some(e.to_string()),
-                        compute_units_consumed: None,
-                    });
-                }
+            Err(e) => {
+                tx_error = Some(format!("{:?}", e));
+                error!("❌ Simulation error: {:?}", e);
+                step!(steps, "simulation ERROR: {:?}", e);
+            }
+        }
+    } else if should_execute {
+        info!("📡 Sending transaction…");
+        step!(steps, "simulate_only=false & should_execute=true → send");
+        match rpc.send_and_confirm_transaction(&tx) {
+            Ok(sig) => {
+                tx_signature = Some(sig.to_string());
+                info!("✅ Send OK: {}", sig);
+                step!(steps, "send OK: {}", sig);
+            }
+            Err(e) => {
+                tx_error = Some(e.to_string());
+                error!("❌ Send error: {}", e);
+                step!(steps, "send ERROR: {}", e);
             }
         }
     } else {
-        info!("⏭️  Skipping transaction execution");
+        info!("⏭️  Skipping execution");
+        step!(steps, "skip execution");
     }
 
-    let execution_time = start_time.elapsed().as_millis() as u64;
-    info!("⏱️  Total execution time: {} ms", execution_time);
+    // Whether ATAs actually created now (only true if planned && we actually sent successfully)
+    let actually_created_in = planned_create_in && !simulate_only && tx_signature.is_some();
+    let actually_created_out = planned_create_out && !simulate_only && tx_signature.is_some();
 
-    // Create comprehensive result
-    let result = ArbitrageResult {
-        timestamp: Utc::now().to_rfc3339(),
-        execution_time_ms: execution_time,
-        cli_inputs: CliInputs {
-            rpc_url: rpc_url.clone(),
-            keypair: keypair_path.clone(),
-            amount_in,
-            spread_threshold_bps,
-            slippage_bps,
-            priority_fee,
-            simulate_only,
-            pool_a: pool_a_addr.clone(),
-            pool_b: pool_b_addr.clone(),
-        },
-        pool_states: PoolStates {
-            pool_a: PoolInfo {
-                address: pool_a_addr.clone(),
-                reserve0: pool_a.reserve0,
-                reserve1: pool_a.reserve1,
-                real_reserve0: pool_a.real_reserve0,
-                real_reserve1: pool_a.real_reserve1,
-                protocol_fees_token0: pool_a.protocol_fees_token0,
-                fund_fees_token0: pool_a.fund_fees_token0,
-                protocol_fees_token1: pool_a.protocol_fees_token1,
-                fund_fees_token1: pool_a.fund_fees_token1,
-                price: price_a,
-                fee_rate: pool_a.fee,
-                mint0: pool_a.mint0.to_string(),
-                mint1: pool_a.mint1.to_string(),
-                decimals0: pool_a.decimals0,
-                decimals1: pool_a.decimals1,
-            },
-            pool_b: PoolInfo {
-                address: pool_b_addr.clone(),
-                reserve0: pool_b.reserve0,
-                reserve1: pool_b.reserve1,
-                real_reserve0: pool_b.real_reserve0,
-                real_reserve1: pool_b.real_reserve1,
-                protocol_fees_token0: pool_b.protocol_fees_token0,
-                fund_fees_token0: pool_b.fund_fees_token0,
-                protocol_fees_token1: pool_b.protocol_fees_token1,
-                fund_fees_token1: pool_b.fund_fees_token1,
-                price: price_b,
-                fee_rate: pool_b.fee,
-                mint0: pool_b.mint0.to_string(),
-                mint1: pool_b.mint1.to_string(),
-                decimals0: pool_b.decimals0,
-                decimals1: pool_b.decimals1,
-            },
-        },
-        computed_values: ComputedValues {
-            amount_out,
-            min_amount_out: min_out,
-            pnl,
-            spread_bps: spread,
-            rent_cost,
-            priority_fee_cost,
-            total_fees,
-            gross_profit,
-            price_a,
-            price_b,
-            is_profitable,
-            meets_spread_threshold,
-            arbitrage_direction: arbitrage_direction.to_string(),
-        },
-        decision: ArbitrageDecision {
-            should_execute,
-            reasons,
-            warnings,
-        },
-        transaction_result,
-    };
+    // ---------- JSON report ----------
+    let execution_time_ms = start_time.elapsed().as_millis() as u64;
 
-    // Convert to JSON and save to file
-    let json_output = serde_json::to_string_pretty(&result)?;
-    std::fs::write("arbitrage_result.json", &json_output)?;
+    let report = json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "execution_time_ms": execution_time_ms,
+        "inputs": {
+            "rpc_url": rpc_url,
+            "keypair_path": keypair_path,
+            "amount_in": amount_in,
+            "spread_threshold_bps": spread_threshold_bps,
+            "slippage_bps": slippage_bps,
+            "priority_fee_microlamports": priority_fee_microlamports,
+            "simulate_only": simulate_only,
+        },
+        "mints": { "mint_in": mint_in.to_string(), "mint_out": mint_out.to_string() },
+        "pools": {
+            "pool_a": pool_a_addr,
+            "pool_b": pool_b_addr,
+            "first": pool_in.pool_id.to_string(),
+            "second": pool_out.pool_id.to_string()
+        },
+        "prices": { "first": price_in, "second": price_out, "spread_bps": spread_bps_val },
+        "pool_values": {
+            "first": {
+                "mint0": in_vals.mint0.to_string(),
+                "mint1": in_vals.mint1.to_string(),
+                "reserve0": in_vals.reserve0,
+                "reserve1": in_vals.reserve1,
+                "vault_amount0": in_vals.vault_amount0,
+                "vault_amount1": in_vals.vault_amount1,
+                "protocol_fees_token0": in_vals.protocol_fees_token0,
+                "protocol_fees_token1": in_vals.protocol_fees_token1,
+                "fund_fees_token0": in_vals.fund_fees_token0,
+                "fund_fees_token1": in_vals.fund_fees_token1,
+                "token0_decimals": in_vals.token0_decimals,
+                "token1_decimals": in_vals.token1_decimals,
+                "trade_fee_rate": in_vals.trade_fee_rate
+            },
+            "second": {
+                "mint0": out_vals.mint0.to_string(),
+                "mint1": out_vals.mint1.to_string(),
+                "reserve0": out_vals.reserve0,
+                "reserve1": out_vals.reserve1,
+                "vault_amount0": out_vals.vault_amount0,
+                "vault_amount1": out_vals.vault_amount1,
+                "protocol_fees_token0": out_vals.protocol_fees_token0,
+                "protocol_fees_token1": out_vals.protocol_fees_token1,
+                "fund_fees_token0": out_vals.fund_fees_token0,
+                "fund_fees_token1": out_vals.fund_fees_token1,
+                "token0_decimals": out_vals.token0_decimals,
+                "token1_decimals": out_vals.token1_decimals,
+                "trade_fee_rate": out_vals.trade_fee_rate
+            }
+        },
+        "flow": {
+            "amount_in": amount_in,                       // mint_in
+            "amount_out_after_first": out1,               // mint_out
+            "amount_out_after_second": out2               // back to mint_in
+        },
+        "calculations": {
+            "amount_in_raw": arb.amount_in_raw,
+            "amount_out_1_raw": arb.amount_out_1_raw,
+            "amount_out_2_raw": arb.amount_out_2_raw,
+            "gross_profit": arb.gross_profit,
+            "gross_profit_raw": arb.gross_profit_raw,
+            "total_fees": arb.total_fees,
+            "total_fees_raw": arb.total_fees_raw,
+            "rent": arb.rent,
+            "rent_raw": arb.rent_raw,
+            "pnl": arb.pnl,
+            "min_out_raw": min_out
+        },
+        "decision": {
+            "is_profitable": is_profitable,
+            "meets_spread_threshold": meets_spread_threshold,
+            "should_execute": should_execute
+        },
+        "token_accounts": [
+            {
+                "mint": mint_in.to_string(),
+                "owner": keypair.pubkey().to_string(),
+                "ata": ata_in_addr.to_string(),
+                "existed_before": atas[0].exists,
+                "planned_to_create_now": planned_create_in,
+                "actually_created_now": actually_created_in
+            },
+            {
+                "mint": mint_out.to_string(),
+                "owner": keypair.pubkey().to_string(),
+                "ata": ata_out_addr.to_string(),
+                "existed_before": atas[1].exists,
+                "planned_to_create_now": planned_create_out,
+                "actually_created_now": actually_created_out
+            }
+        ],
+        "tx": {
+            "mode": if simulate_only { "simulate" } else if should_execute { "send" } else { "skip" },
+            "signature": tx_signature,
+            "simulate_result": simulate_result,
+            "error": tx_error
+        },
+        "steps": steps
+    });
+
+    // Save & print JSON report
+    let json_str = serde_json::to_string_pretty(&report)?;
+    fs::write("arbitrage_result.json", &json_str)?;
     info!("📄 Detailed report saved to: arbitrage_result.json");
+    println!("{}", json_str);
 
-    // Print summary to console
-    println!("\n📊 ARBITRAGE ANALYSIS SUMMARY");
-    println!("═══════════════════════════════════════════════");
-    println!("🕒 Timestamp: {}", result.timestamp);
-    println!("⏱️  Execution Time: {} ms", result.execution_time_ms);
-    println!("💱 Spread: {:.2} bps", result.computed_values.spread_bps);
-    println!("📈 PnL: {:.6} tokens", result.computed_values.pnl);
-    println!("✅ Profitable: {}", result.computed_values.is_profitable);
-    println!(
-        "🎯 Meets Threshold: {}",
-        result.computed_values.meets_spread_threshold
-    );
-    println!(
-        "🔄 Direction: {}",
-        result.computed_values.arbitrage_direction
-    );
-    println!("⚡ Should Execute: {}", result.decision.should_execute);
-
-    if let Some(tx_result) = &result.transaction_result {
-        println!("📡 Transaction Success: {}", tx_result.success);
-        if let Some(signature) = &tx_result.transaction_signature {
-            println!("📝 Transaction Signature: {}", signature);
-        }
-    }
-
-    println!("═══════════════════════════════════════════════");
-
-    if result.decision.should_execute
-        && result
-            .transaction_result
-            .as_ref()
-            .map_or(false, |t| t.success)
-    {
-        info!("🎉 Arbitrage completed successfully!");
-    } else if !result.decision.should_execute {
-        info!("ℹ️  No arbitrage opportunity found");
-    } else {
-        warn!("⚠️  Arbitrage opportunity found but execution failed");
-    }
-
+    info!("⏱  Total execution time: {} ms", execution_time_ms);
+    info!("════════════════════════════════════════════");
     Ok(())
 }
