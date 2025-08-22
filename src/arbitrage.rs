@@ -108,8 +108,10 @@ pub fn calculate_price(reserve0: u64, reserve1: u64, decimals0: u8, decimals1: u
 }
 
 pub fn spread_bps(price_a: f64, price_b: f64) -> f64 {
-    let spread = (price_b - price_a) / price_a;
-    (spread * 10000.0) as f64
+    let midpoint = (price_a + price_b) / 2.0;
+    if midpoint == 0.0 { return 0.0; }
+    let spread = (price_b - price_a).abs() / midpoint;
+    spread * 10000.0
 }
 
 pub fn calculate_min_out(amount_out: u64, slippage_bps: u32) -> u64 {
