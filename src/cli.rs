@@ -23,7 +23,7 @@ pub struct AppState {
     pub mint_out: Option<String>,
 
     // Trading params
-    pub amount_in: Option<f64>,               // decimal units of chosen mint
+    pub amount_in: Option<f64>, // decimal units of chosen mint
     pub spread_threshold_bps: Option<u32>,
     pub slippage_bps: Option<u32>,
     pub priority_fee_microlamports: Option<u64>,
@@ -129,22 +129,46 @@ pub enum ConfigCmd {
 // ======================= Config flows =======================
 
 pub fn config_set_pools(state_path: &Path, state: &mut AppState) -> Result<()> {
-    println!("Current poolA: {}", state.pool_a.clone().unwrap_or("-unset-".into()));
-    let change_a = Confirm::new().with_prompt("Change poolA?").default(false).interact()?;
+    println!(
+        "Current poolA: {}",
+        state.pool_a.clone().unwrap_or("-unset-".into())
+    );
+    let change_a = Confirm::new()
+        .with_prompt("Change poolA?")
+        .default(false)
+        .interact()?;
     if change_a {
         let new_a: String = Input::new()
             .with_prompt("Enter poolA address")
-            .validate_with(|s: &String| if s.trim().is_empty() { Err("poolA cannot be empty") } else { Ok(()) })
+            .validate_with(|s: &String| {
+                if s.trim().is_empty() {
+                    Err("poolA cannot be empty")
+                } else {
+                    Ok(())
+                }
+            })
             .interact_text()?;
         state.pool_a = Some(new_a);
     }
 
-    println!("Current poolB: {}", state.pool_b.clone().unwrap_or("-unset-".into()));
-    let change_b = Confirm::new().with_prompt("Change poolB?").default(false).interact()?;
+    println!(
+        "Current poolB: {}",
+        state.pool_b.clone().unwrap_or("-unset-".into())
+    );
+    let change_b = Confirm::new()
+        .with_prompt("Change poolB?")
+        .default(false)
+        .interact()?;
     if change_b {
         let new_b: String = Input::new()
             .with_prompt("Enter poolB address")
-            .validate_with(|s: &String| if s.trim().is_empty() { Err("poolB cannot be empty") } else { Ok(()) })
+            .validate_with(|s: &String| {
+                if s.trim().is_empty() {
+                    Err("poolB cannot be empty")
+                } else {
+                    Ok(())
+                }
+            })
             .interact_text()?;
         state.pool_b = Some(new_b);
     }
@@ -153,7 +177,9 @@ pub fn config_set_pools(state_path: &Path, state: &mut AppState) -> Result<()> {
     let rpc = match &state.rpc_url {
         Some(u) => u.clone(),
         None => {
-            println!("rpc-url not set in state; skipping mint computation. Use `config set-rpc-url`.");
+            println!(
+                "rpc-url not set in state; skipping mint computation. Use `config set-rpc-url`."
+            );
             save_state(state_path, state)?;
             return Ok(());
         }
@@ -182,7 +208,9 @@ pub fn config_set_pools(state_path: &Path, state: &mut AppState) -> Result<()> {
     };
 
     if changed {
-        println!("Detected mint change or unset mints; choose which mint is the INPUT (amount-in token).");
+        println!(
+            "Detected mint change or unset mints; choose which mint is the INPUT (amount-in token)."
+        );
         let items = vec![m0.clone(), m1.clone()];
         // Default to current mint_in if it matches one of them
         let default_idx = match state.mint_in.as_ref() {
@@ -208,7 +236,13 @@ pub fn config_set_pools(state_path: &Path, state: &mut AppState) -> Result<()> {
             .with_prompt("Enter amount-in (decimal)")
             .validate_with(|v: &String| {
                 v.parse::<f64>()
-                    .map(|x| if x >= 0.0 { Ok(()) } else { Err("must be >= 0.0") })
+                    .map(|x| {
+                        if x >= 0.0 {
+                            Ok(())
+                        } else {
+                            Err("must be >= 0.0")
+                        }
+                    })
                     .unwrap_or(Err("invalid number"))
             })
             .interact_text()?
@@ -237,7 +271,6 @@ pub fn config_set_pools(state_path: &Path, state: &mut AppState) -> Result<()> {
     );
     Ok(())
 }
-
 
 pub fn config_set_rpc(state_path: &Path, state: &mut AppState) -> Result<()> {
     let cur = state.rpc_url.clone().unwrap_or("-unset-".into());
@@ -272,7 +305,10 @@ pub fn config_set_amount_in(state_path: &Path, state: &mut AppState) -> Result<(
     let pair: (String, String) = if state.pool_a.is_some() && state.pool_b.is_some() {
         match &state.rpc_url {
             Some(rpc) => {
-                let (a, b) = (state.pool_a.as_ref().unwrap(), state.pool_b.as_ref().unwrap());
+                let (a, b) = (
+                    state.pool_a.as_ref().unwrap(),
+                    state.pool_b.as_ref().unwrap(),
+                );
                 compute_mints(rpc, a, b)?
             }
             None => match maybe_pair_from_state {
@@ -283,7 +319,9 @@ pub fn config_set_amount_in(state_path: &Path, state: &mut AppState) -> Result<(
     } else {
         match maybe_pair_from_state {
             Some(p) => p,
-            None => bail!("Mint addresses are unknown. Set pools first: `solana-cpmm-arb-cli config set-pools`"),
+            None => bail!(
+                "Mint addresses are unknown. Set pools first: `solana-cpmm-arb-cli config set-pools`"
+            ),
         }
     };
 
@@ -314,7 +352,13 @@ pub fn config_set_amount_in(state_path: &Path, state: &mut AppState) -> Result<(
         .with_prompt("Enter amount-in (decimal)")
         .validate_with(|v: &String| {
             v.parse::<f64>()
-                .map(|x| if x >= 0.0 { Ok(()) } else { Err("must be >= 0.0") })
+                .map(|x| {
+                    if x >= 0.0 {
+                        Ok(())
+                    } else {
+                        Err("must be >= 0.0")
+                    }
+                })
                 .unwrap_or(Err("invalid number"))
         })
         .interact_text()?
@@ -330,7 +374,6 @@ pub fn config_set_amount_in(state_path: &Path, state: &mut AppState) -> Result<(
     );
     Ok(())
 }
-
 
 pub fn config_set_spread_threshold_bps(state_path: &Path, state: &mut AppState) -> Result<()> {
     let cur = state.spread_threshold_bps.unwrap_or(0);

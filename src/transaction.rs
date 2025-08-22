@@ -16,11 +16,7 @@ use crate::{arbitrage::SOL_MINT, pool::PoolData, utils::TokenAccount};
 
 const COMPUTE_UNIT_LIMIT: u32 = 400_000;
 
-pub fn create_ata_instruction(
-    payer: &Pubkey,
-    wallet: &Pubkey,
-    mint: &Pubkey,
-) -> Instruction {
+pub fn create_ata_instruction(payer: &Pubkey, wallet: &Pubkey, mint: &Pubkey) -> Instruction {
     let create_ata_ix = spl_associated_token_account::instruction::create_associated_token_account(
         payer,
         wallet,
@@ -53,10 +49,20 @@ pub fn create_swap_instruction(
 
     let (input_vault, output_vault, input_mint, output_mint) = if swap_direction {
         // token0 -> token1 (e.g., SOL -> USDC)
-        (pool_state.token0_vault, pool_state.token1_vault, pool_state.token0_mint, pool_state.token1_mint)
+        (
+            pool_state.token0_vault,
+            pool_state.token1_vault,
+            pool_state.token0_mint,
+            pool_state.token1_mint,
+        )
     } else {
         // token1 -> token0 (e.g., USDC -> SOL)
-        (pool_state.token1_vault, pool_state.token0_vault, pool_state.token1_mint, pool_state.token0_mint)
+        (
+            pool_state.token1_vault,
+            pool_state.token0_vault,
+            pool_state.token1_mint,
+            pool_state.token0_mint,
+        )
     };
 
     let instruction = SwapBaseInputBuilder::new()
@@ -105,7 +111,11 @@ pub fn create_arbitrage_transaction(
     for ata in &atas {
         if !ata.exists {
             if ata.mint == SOL_MINT.parse::<Pubkey>().unwrap() {
-                instructions.push(create_ata_instruction(&payer_pubkey, &payer_pubkey, &ata.mint));
+                instructions.push(create_ata_instruction(
+                    &payer_pubkey,
+                    &payer_pubkey,
+                    &ata.mint,
+                ));
                 instructions.push(system_instruction::transfer(
                     &payer_pubkey,
                     &ata.ata,
@@ -115,9 +125,12 @@ pub fn create_arbitrage_transaction(
                     &spl_token::id(),
                     &ata.ata,
                 )?);
-            }
-            else {
-                instructions.push(create_ata_instruction(&payer_pubkey, &payer_pubkey, &ata.mint));
+            } else {
+                instructions.push(create_ata_instruction(
+                    &payer_pubkey,
+                    &payer_pubkey,
+                    &ata.mint,
+                ));
             }
         }
     }
@@ -147,7 +160,6 @@ pub fn create_arbitrage_transaction(
     )?;
     instructions.push(swap2_ix);
 
-    // 5. Create transaction
     let recent_blockhash = rpc.get_latest_blockhash()?;
     let message = Message::new(&instructions, Some(&payer_pubkey));
     let transaction = Transaction::new(&[payer], message, recent_blockhash);

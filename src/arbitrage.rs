@@ -31,7 +31,8 @@ pub fn calculate_pnl(
     rent_raw: u64,
     priority_fee: u64,
 ) -> Arbitrage {
-    let total_fees_raw = rent_raw + priority_fee * ESTIMATED_COMPUTE_UNITS / MICRO_LAMPORTS_PER_LAMPORTS;
+    let total_fees_raw =
+        rent_raw + priority_fee * ESTIMATED_COMPUTE_UNITS / MICRO_LAMPORTS_PER_LAMPORTS;
     let amount_in_raw = (amount_in * 10_f64.powi(pool_in.token0_decimals as i32)) as u64;
 
     let amount_out_raw_1 = calculate_swap_output_raw(
@@ -109,7 +110,9 @@ pub fn calculate_price(reserve0: u64, reserve1: u64, decimals0: u8, decimals1: u
 
 pub fn spread_bps(price_a: f64, price_b: f64) -> f64 {
     let midpoint = (price_a + price_b) / 2.0;
-    if midpoint == 0.0 { return 0.0; }
+    if midpoint == 0.0 {
+        return 0.0;
+    }
     let spread = (price_b - price_a).abs() / midpoint;
     spread * 10000.0
 }

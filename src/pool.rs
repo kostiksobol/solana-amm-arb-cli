@@ -1,10 +1,13 @@
 use anyhow::{Result, anyhow};
-use carbon_raydium_cpmm_decoder::{accounts::{amm_config::AmmConfig, pool_state::PoolState, RaydiumCpmmAccount}, RaydiumCpmmDecoder};
-use solana_client::rpc_client::RpcClient;
-use solana_sdk::pubkey::Pubkey;
 use carbon_core::account::AccountDecoder;
-use spl_token::state::Account;
+use carbon_raydium_cpmm_decoder::{
+    RaydiumCpmmDecoder,
+    accounts::{RaydiumCpmmAccount, amm_config::AmmConfig, pool_state::PoolState},
+};
+use solana_client::rpc_client::RpcClient;
 use solana_program::program_pack::Pack;
+use solana_sdk::pubkey::Pubkey;
+use spl_token::state::Account;
 
 pub struct PoolData {
     pub pool_id: Pubkey,
@@ -32,7 +35,7 @@ impl PoolData {
     pub fn new(rpc: &RpcClient, pool_address: &str, decoder: &RaydiumCpmmDecoder) -> Result<Self> {
         let pool_pk: Pubkey = pool_address.parse()?;
         let pool_acc = rpc.get_account(&pool_pk)?;
-    
+
         let pool_state = match decoder
             .decode_account(&pool_acc)
             .ok_or(anyhow!("Failed to decode pool account"))?
@@ -41,7 +44,7 @@ impl PoolData {
             RaydiumCpmmAccount::PoolState(state) => state,
             _ => return Err(anyhow!("Invalid pool account type")),
         };
-    
+
         let config_acc = rpc.get_account(&pool_state.amm_config)?;
         let amm_config = match decoder
             .decode_account(&config_acc)
@@ -52,13 +55,17 @@ impl PoolData {
             _ => return Err(anyhow!("Invalid config account type")),
         };
 
-        Ok(Self { pool_id: pool_pk, state: pool_state, config: amm_config })
+        Ok(Self {
+            pool_id: pool_pk,
+            state: pool_state,
+            config: amm_config,
+        })
     }
 
     pub fn get_values(&self, rpc: &RpcClient) -> Result<PoolValues> {
         let vault0_acc = rpc.get_account(&self.state.token0_vault)?;
         let vault1_acc = rpc.get_account(&self.state.token1_vault)?;
-    
+
         let vault0_data = Account::unpack(&vault0_acc.data)?;
         let vault1_data = Account::unpack(&vault1_acc.data)?;
 

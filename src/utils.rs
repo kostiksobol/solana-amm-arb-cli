@@ -23,12 +23,24 @@ pub struct TokenAccount {
     pub exists: bool,
 }
 
-pub fn get_missing_token_account(rpc: &RpcClient, wallet: &Pubkey, token_mint: &Pubkey) -> TokenAccount {
+pub fn get_missing_token_account(
+    rpc: &RpcClient,
+    wallet: &Pubkey,
+    token_mint: &Pubkey,
+) -> TokenAccount {
     let ata = get_associated_token_address(wallet, token_mint);
 
     if rpc.get_account(&ata).is_err() {
-        TokenAccount { mint: *token_mint, ata, exists: false }
+        TokenAccount {
+            mint: *token_mint,
+            ata,
+            exists: false,
+        }
     } else {
-        TokenAccount { mint: *token_mint, ata, exists: true }
-    }   
+        TokenAccount {
+            mint: *token_mint,
+            ata,
+            exists: true,
+        }
+    }
 }
