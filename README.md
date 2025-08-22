@@ -1,6 +1,6 @@
 # solana-amm-arb-cli — concise guide
 
-## Install (global CLI)
+## Install as a real CLI (on PATH)
 
 ```bash
 # From the project root
@@ -8,7 +8,7 @@ cargo install --path .
 
 # Ensure cargo bin dir is on PATH
 echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
-# (or add to ~/.zshrc if you use zsh)
+# or zsh:  ~/.zshrc
 
 # Alternative (system-wide)
 cargo build --release
@@ -24,7 +24,7 @@ Now you can run `solana-amm-arb-cli` from anywhere.
 ```bash
 solana-amm-arb-cli config set-rpc-url        # checks node health
 solana-amm-arb-cli config set-keypair        # validates keypair file
-solana-amm-arb-cli config set-pools          # set PoolA/PoolB → detect mints, pick mint_in, set amount_in
+solana-amm-arb-cli config set-pools          # set PoolA/PoolB → auto-detect mints, pick mint_in, set amount_in
 solana-amm-arb-cli config set-amount-in      # re-pick mint_in and amount_in if needed
 solana-amm-arb-cli config set-spread-threshold-bps
 solana-amm-arb-cli config set-slippage-bps
@@ -44,7 +44,7 @@ solana-amm-arb-cli config reset-defaults
 solana-amm-arb-cli   --amount-in 0.01   --spread-threshold-bps 100   --slippage-bps 500   --priority-fee 150000   --simulate-only true
 ```
 
-Supported flags:
+### Supported flags
 
 - `--rpc-url <STRING>`
 - `--keypair <PATH>`
@@ -54,20 +54,21 @@ Supported flags:
 - `--priority-fee <U64>` (micro-lamports)
 - `--simulate-only <BOOL>` (`true` to only simulate, `false` to send)
 
-Output on each run:
-- Logs (control with `RUST_LOG=info|debug`)
-- `./arbitrage_result.json` with full analysis, decision, and tx/simulation result
+### Output
+
+- Detailed logs (control with `RUST_LOG=info|debug`)
+- `arbitrage_result.json` with the full analysis, decision, and tx/simulation result
 
 ---
 
-## State: location, shape, defaults
+## State: location, shape, and defaults
 
-### Location
+### Where the state file lives
 
-State file `state.json` is stored via `directories::ProjectDirs` with app id `com.yourorg.solana-amm-arb-cli`:
+`state.json` is placed in the OS-specific app directory (via `directories::ProjectDirs` with app id `com.yourorg.solana-amm-arb-cli`):
 
 - **Linux:** `${XDG_STATE_HOME:-$HOME/.local/state}/solana-amm-arb-cli/state.json`  
-  (falls back to `${XDG_CONFIG_HOME:-$HOME/.config}/solana-amm-arb-cli/state.json`)
+  (falls back to `${XDG_CONFIG_HOME:-$HOME/.config}/solana-amm-arb-cli/state.json` if needed)
 - **macOS:** `~/Library/Application Support/solana-amm-arb-cli/state.json`
 - **Windows:** `%APPDATA%\solana-amm-arb-cli\state.json`
 
@@ -89,7 +90,7 @@ State file `state.json` is stored via `directories::ProjectDirs` with app id `co
 }
 ```
 
-### Shipped defaults (`default_state()`)
+### Shipped defaults (from `default_state()`)
 
 ```json
 {
@@ -107,4 +108,13 @@ State file `state.json` is stored via `directories::ProjectDirs` with app id `co
 }
 ```
 
-You can modify these defaults in code (`default_state()`); users can override via interactive `config` or per-run flags.
+You can change these defaults in code (`default_state()`), and users can always override values interactively (`config` commands) or per-run via flags.
+
+---
+
+## Notes
+
+- The tool normalizes both pools so `token0 == mint_in` for consistent price/PnL math.
+- If `mint_in` is not SOL, `pnl` in `mint_in` may be `null` (fees are in SOL); gross profit and fees are still reported.
+- For logs: `RUST_LOG=info solana-amm-arb-cli …`
+- The JSON report is written to `./arbitrage_result.json` on every run.
