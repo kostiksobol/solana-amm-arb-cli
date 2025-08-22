@@ -3,7 +3,7 @@ use carbon_raydium_cpmm_decoder::RaydiumCpmmDecoder;
 use chrono::Utc;
 use clap::Parser;
 use log::{error, info, warn};
-use serde_json::json;
+use serde_json::{json, Value};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{pubkey::Pubkey, signer::Signer};
 use spl_associated_token_account::get_associated_token_address;
@@ -35,19 +35,32 @@ macro_rules! step {
 
 fn pk_s(p: &Pubkey) -> String { p.to_string() }
 
+fn ui_amount(raw: u64, decimals: u8) -> f64 {
+    let factor = 10f64.powi(decimals as i32);
+    (raw as f64) / factor
+}
+
 /* --------------------- Logging helpers --------------------- */
 
 fn log_pool(label: &str, addr: &str, v: &PoolValues) {
     info!("──────── {} [{}] ────────", label, addr);
     info!("  • token0 (mint_in): {}", v.mint0);
     info!("    - decimals: {}", v.token0_decimals);
-    info!("    - reserve0: {}", v.reserve0);
+    info!(
+        "    - reserve0: {} (ui {})",
+        v.reserve0,
+        ui_amount(v.reserve0, v.token0_decimals)
+    );
     info!("    - vault_amount0: {}", v.vault_amount0);
     info!("    - protocol_fees_token0: {}", v.protocol_fees_token0);
     info!("    - fund_fees_token0: {}", v.fund_fees_token0);
     info!("  • token1 (mint_out): {}", v.mint1);
     info!("    - decimals: {}", v.token1_decimals);
-    info!("    - reserve1: {}", v.reserve1);
+    info!(
+        "    - reserve1: {} (ui {})",
+        v.reserve1,
+        ui_amount(v.reserve1, v.token1_decimals)
+    );
     info!("    - vault_amount1: {}", v.vault_amount1);
     info!("    - protocol_fees_token1: {}", v.protocol_fees_token1);
     info!("    - fund_fees_token1: {}", v.fund_fees_token1);
@@ -204,7 +217,7 @@ fn main() -> Result<()> {
     pool_a_values.normalize_pool_values(&mint_in);
     pool_b_values.normalize_pool_values(&mint_in);
 
-    // Detailed Pool Logging
+    // Detailed Pool Logging (now with UI reserves)
     log_pool("Pool A", &pool_a_addr, &pool_a_values);
     log_pool("Pool B", &pool_b_addr, &pool_b_values);
 
@@ -323,22 +336,41 @@ fn main() -> Result<()> {
 
     // ---------- Execute or simulate ----------
     let mut tx_signature: Option<String> = None;
-    let mut simulate_result: Option<String> = None;
+    let mut simulate_result: Option<Value> = None;
     let mut tx_error: Option<String> = None;
 
     if simulate_only {
         info!("Simulating transaction…");
         step!(steps, "simulate_only=true → simulate");
+    
         match simulate_transaction(&rpc, &tx) {
             Ok(result) => {
-                simulate_result = Some(format!("{:?}", result));
-                info!("Simulation OK");
-                step!(steps, "simulation OK");
+                // Store full structured result for the final JSON report
+                let result_json = serde_json::to_value(&result).unwrap_or(Value::Null);
+                simulate_result = Some(result_json);
+    
+                if let Some(err) = result.err {
+                    // Concise error logging only (no pretty JSON dump)
+                    error!("Simulation error: {:?}", err);
+                    if let Some(units) = result.units_consumed {
+                        error!("Compute units consumed: {}", units);
+                    }
+                    if let Some(logs) = result.logs.as_ref().and_then(|v| v.last()) {
+                        // Optional: just a single hint line, not the whole payload
+                        error!("Last program log: {}", logs);
+                    }
+                    step!(steps, "simulation ERROR: {:?}", err);
+                    tx_error = Some(format!("{:?}", err));
+                } else {
+                    // Success: concise OK line
+                    info!("Simulation OK (units_consumed: {:?})", result.units_consumed);
+                    step!(steps, "simulation OK");
+                }
             }
             Err(e) => {
-                tx_error = Some(format!("{:?}", e));
-                error!("Simulation error: {:?}", e);
-                step!(steps, "simulation ERROR: {:?}", e);
+                tx_error = Some(e.to_string());
+                error!("Simulation call failed: {}", e);
+                step!(steps, "simulation ERROR: {}", e);
             }
         }
     } else if should_execute {
@@ -385,7 +417,7 @@ fn main() -> Result<()> {
         "skipped_no_send"
     };
 
-    // ---------- JSON report ----------
+    // ---------- JSON report (now includes reserve*_ui) ----------
     let execution_time_ms = start_time.elapsed().as_millis() as u64;
 
     let report = json!({
@@ -418,6 +450,8 @@ fn main() -> Result<()> {
                 "mint1": in_vals.mint1.to_string(),
                 "reserve0": in_vals.reserve0,
                 "reserve1": in_vals.reserve1,
+                "reserve0_ui": ui_amount(in_vals.reserve0, in_vals.token0_decimals),
+                "reserve1_ui": ui_amount(in_vals.reserve1, in_vals.token1_decimals),
                 "vault_amount0": in_vals.vault_amount0,
                 "vault_amount1": in_vals.vault_amount1,
                 "protocol_fees_token0": in_vals.protocol_fees_token0,
@@ -433,6 +467,8 @@ fn main() -> Result<()> {
                 "mint1": out_vals.mint1.to_string(),
                 "reserve0": out_vals.reserve0,
                 "reserve1": out_vals.reserve1,
+                "reserve0_ui": ui_amount(out_vals.reserve0, out_vals.token0_decimals),
+                "reserve1_ui": ui_amount(out_vals.reserve1, out_vals.token1_decimals),
                 "vault_amount0": out_vals.vault_amount0,
                 "vault_amount1": out_vals.vault_amount1,
                 "protocol_fees_token0": out_vals.protocol_fees_token0,
@@ -519,7 +555,7 @@ fn main() -> Result<()> {
     let json_str = serde_json::to_string_pretty(&report)?;
     fs::write("arbitrage_result.json", &json_str)?;
     info!("Detailed report saved to: arbitrage_result.json");
-    println!("{}", json_str);
+    // println!("{}", json_str);
 
     let execution_time_ms = start_time.elapsed().as_millis() as u64;
     info!("Total execution time: {} ms", execution_time_ms);
