@@ -4,11 +4,7 @@
 
 ```bash
 # From the project root
-cargo install --path .
-
-# Ensure cargo bin dir is on PATH
-echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
-# or zsh:  ~/.zshrc
+./target/release/solana-amm-arb-cli
 
 # Alternative (system-wide)
 cargo build --release
